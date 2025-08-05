@@ -377,8 +377,8 @@ pub struct OpenRemote {
 pub struct OpenGitDirectory {
     #[serde(default)]
     pub create_new_window: bool,
-    /// Directories to scan for git repositories. Defaults to ["~/git"] if not specified.
-    pub directories: Option<Vec<String>>,
+    /// Directories to scan for git repositories.
+    pub directories: Vec<String>,
 }
 
 /// Where to spawn the task in the UI.

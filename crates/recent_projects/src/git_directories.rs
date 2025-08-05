@@ -99,7 +99,7 @@ impl ModalView for GitDirectories {}
 impl GitDirectories {
     fn new(
         delegate: GitDirectoriesDelegate,
-        directories: Option<Vec<String>>,
+        directories: Vec<String>,
         rem_width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -109,26 +109,16 @@ impl GitDirectories {
 
         // Spawn task to scan git directories
         cx.spawn_in(window, async move |this, cx| {
-            let scan_dirs = if let Some(custom_dirs) = directories {
-                custom_dirs
-                    .into_iter()
-                    .map(|dir| {
-                        PathBuf::from(
-                            shellexpand::full(&dir)
-                                .unwrap_or_else(|_| dir.clone().into())
-                                .into_owned(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                match dirs::home_dir() {
-                    Some(home_dir) => vec![home_dir.join("git")],
-                    None => {
-                        log::warn!("Could not determine home directory");
-                        Vec::new()
-                    }
-                }
-            };
+            let scan_dirs = directories
+                .into_iter()
+                .map(|dir| {
+                    PathBuf::from(
+                        shellexpand::full(&dir)
+                            .unwrap_or_else(|_| dir.clone().into())
+                            .into_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
 
             let mut all_directories = Vec::new();
             for scan_dir in scan_dirs {
@@ -159,7 +149,7 @@ impl GitDirectories {
     pub fn open(
         workspace: &mut Workspace,
         create_new_window: bool,
-        directories: Option<Vec<String>>,
+        directories: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
@@ -206,7 +196,7 @@ impl GitDirectoriesDelegate {
     fn new(
         workspace: WeakEntity<Workspace>,
         create_new_window: bool,
-        scan_directories: Option<Vec<String>>,
+        scan_directories: Vec<String>,
     ) -> Self {
         Self {
             workspace,
@@ -215,7 +205,6 @@ impl GitDirectoriesDelegate {
             matches: Default::default(),
             create_new_window,
             scan_directories: scan_directories
-                .unwrap_or_else(|| vec!["~/git".to_string()])
                 .into_iter()
                 .map(|d| {
                     PathBuf::from(
@@ -556,7 +545,8 @@ mod tests {
 
     #[gpui::test]
     fn test_git_directories_delegate_creation() {
-        let delegate = GitDirectoriesDelegate::new(WeakEntity::new_invalid(), false, None);
+        let directories = vec!["~/git".to_string()];
+        let delegate = GitDirectoriesDelegate::new(WeakEntity::new_invalid(), false, directories);
         assert_eq!(delegate.directories.len(), 0);
         assert_eq!(delegate.matches.len(), 0);
         assert_eq!(delegate.selected_match_index, 0);
@@ -572,8 +562,7 @@ mod tests {
     #[gpui::test]
     fn test_git_directories_delegate_with_multiple_directories() {
         let directories = vec!["$HOME/work".to_string(), "$HOME/personal".to_string()];
-        let delegate =
-            GitDirectoriesDelegate::new(WeakEntity::new_invalid(), false, Some(directories));
+        let delegate = GitDirectoriesDelegate::new(WeakEntity::new_invalid(), false, directories);
         assert_eq!(delegate.directories.len(), 0);
         assert_eq!(delegate.matches.len(), 0);
         assert_eq!(delegate.selected_match_index, 0);

@@ -558,7 +558,6 @@
       // Change to open path modal for existing remote connection by setting the parameter
       // "alt-ctrl-shift-o": "["projects::OpenRemote", { "from_existing_connection": true }]",
       "alt-ctrl-shift-o": ["projects::OpenRemote", { "from_existing_connection": false, "create_new_window": false }],
-      "alt-ctrl-g": ["projects::OpenGitDirectory", { "create_new_window": false }],
       "alt-ctrl-shift-b": "branches::OpenRecent",
       "alt-shift-enter": "toast::RunAction",
       "ctrl-~": "workspace::NewTerminal",

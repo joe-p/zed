@@ -1,9 +1,6 @@
 {
   "context": "Workspace",
   "bindings": {
-    // Default git directory scanner (scans ~/git)
-    "alt-cmd-g": ["projects::OpenGitDirectory", { "create_new_window": false }],
-
     // Custom single git directory examples
     "alt-cmd-shift-g": [
       "projects::OpenGitDirectory",
