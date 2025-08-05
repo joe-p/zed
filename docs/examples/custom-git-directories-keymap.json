@@ -1,0 +1,67 @@
+{
+  "context": "Workspace",
+  "bindings": {
+    // Default git directory scanner (scans ~/git)
+    "alt-cmd-g": ["projects::OpenGitDirectory", { "create_new_window": false }],
+
+    // Custom git directory examples
+    "alt-cmd-shift-g": [
+      "projects::OpenGitDirectory",
+      {
+        "directory": "/path/to/your/projects",
+        "create_new_window": false
+      }
+    ],
+
+    // Using environment variables
+    "ctrl-cmd-g": [
+      "projects::OpenGitDirectory",
+      {
+        "directory": "$HOME/dev",
+        "create_new_window": false
+      }
+    ],
+
+    // Multiple project directories - you can create separate bindings for each
+    "alt-cmd-1": [
+      "projects::OpenGitDirectory",
+      {
+        "directory": "$HOME/work",
+        "create_new_window": false
+      }
+    ],
+
+    "alt-cmd-2": [
+      "projects::OpenGitDirectory",
+      {
+        "directory": "$HOME/personal",
+        "create_new_window": false
+      }
+    ],
+
+    "alt-cmd-3": [
+      "projects::OpenGitDirectory",
+      {
+        "directory": "/usr/local/src",
+        "create_new_window": false
+      }
+    ],
+
+    // Open in new window variants
+    "alt-cmd-shift-1": [
+      "projects::OpenGitDirectory",
+      {
+        "directory": "$HOME/work",
+        "create_new_window": true
+      }
+    ],
+
+    "alt-cmd-shift-2": [
+      "projects::OpenGitDirectory",
+      {
+        "directory": "$HOME/personal",
+        "create_new_window": true
+      }
+    ]
+  }
+}

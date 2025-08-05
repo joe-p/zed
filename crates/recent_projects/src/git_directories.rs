@@ -1,11 +1,11 @@
 //! Git Directories Modal
 //!
 //! This module provides a modal interface for browsing and opening directories
-//! under ~/git. It's similar to the recent projects modal but specifically
-//! shows git repositories and projects in the user's git directory.
+//! under a specified directory (defaults to ~/git). It's similar to the recent projects modal but specifically
+//! shows git repositories and projects in the specified directory.
 //!
 //! ## Features
-//! - Automatically scans ~/git for subdirectories
+//! - Automatically scans specified directory (defaults to ~/git) for subdirectories
 //! - Intelligently detects git repositories (directories with .git folder)
 //! - Detects projects with source code files
 //! - Provides fuzzy search over directory names
@@ -17,6 +17,21 @@
 //! bound to:
 //! - macOS: `Alt+Cmd+G`
 //! - Linux: `Alt+Ctrl+G`
+//!
+//! ### Default Usage (scans ~/git)
+//! ```json
+//! {"action": "projects::OpenGitDirectory", "create_new_window": false}
+//! ```
+//!
+//! ### Custom Directory Usage
+//! ```json
+//! {"action": "projects::OpenGitDirectory", "directory": "/path/to/projects", "create_new_window": false}
+//! ```
+//!
+//! ### Using Environment Variables
+//! ```json
+//! {"action": "projects::OpenGitDirectory", "directory": "$HOME/dev", "create_new_window": false}
+//! ```
 //!
 //! ## Directory Detection
 //! The scanner looks for:
@@ -52,9 +67,10 @@ use zed_actions::OpenGitDirectory;
 pub fn init(cx: &mut App) {
     cx.on_action(|open_git_directory: &OpenGitDirectory, cx| {
         let create_new_window = open_git_directory.create_new_window;
+        let directory = open_git_directory.directory.clone();
         with_active_or_new_workspace(cx, move |workspace, window, cx| {
             let Some(git_directories) = workspace.active_modal::<GitDirectories>(cx) else {
-                GitDirectories::open(workspace, create_new_window, window, cx);
+                GitDirectories::open(workspace, create_new_window, directory, window, cx);
                 return;
             };
 
@@ -78,6 +94,7 @@ impl ModalView for GitDirectories {}
 impl GitDirectories {
     fn new(
         delegate: GitDirectoriesDelegate,
+        directory: Option<String>,
         rem_width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -87,19 +104,30 @@ impl GitDirectories {
 
         // Spawn task to scan git directories
         cx.spawn_in(window, async move |this, cx| {
-            let directories = match dirs::home_dir() {
-                Some(home_dir) => {
-                    let git_path = home_dir.join("git");
-                    if git_path.exists() && git_path.is_dir() {
-                        scan_git_directories(&git_path).await.unwrap_or_default()
-                    } else {
-                        log::info!("Git directory not found at {}", git_path.display());
+            let directories = if let Some(custom_dir) = directory {
+                let expanded_dir = expand_path(&custom_dir);
+                let git_path = PathBuf::from(expanded_dir);
+                if git_path.exists() && git_path.is_dir() {
+                    scan_git_directories(&git_path).await.unwrap_or_default()
+                } else {
+                    log::info!("Custom git directory not found at {}", git_path.display());
+                    Vec::new()
+                }
+            } else {
+                match dirs::home_dir() {
+                    Some(home_dir) => {
+                        let git_path = home_dir.join("git");
+                        if git_path.exists() && git_path.is_dir() {
+                            scan_git_directories(&git_path).await.unwrap_or_default()
+                        } else {
+                            log::info!("Git directory not found at {}", git_path.display());
+                            Vec::new()
+                        }
+                    }
+                    None => {
+                        log::warn!("Could not determine home directory");
                         Vec::new()
                     }
-                }
-                None => {
-                    log::warn!("Could not determine home directory");
-                    Vec::new()
                 }
             };
 
@@ -123,13 +151,14 @@ impl GitDirectories {
     pub fn open(
         workspace: &mut Workspace,
         create_new_window: bool,
+        directory: Option<String>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
         let weak = cx.entity().downgrade();
         workspace.toggle_modal(window, cx, |window, cx| {
-            let delegate = GitDirectoriesDelegate::new(weak, create_new_window);
-            Self::new(delegate, 34., window, cx)
+            let delegate = GitDirectoriesDelegate::new(weak, create_new_window, directory.clone());
+            Self::new(delegate, directory, 34., window, cx)
         })
     }
 }
@@ -161,16 +190,22 @@ pub struct GitDirectoriesDelegate {
     selected_match_index: usize,
     matches: Vec<StringMatch>,
     create_new_window: bool,
+    scan_directory: Option<PathBuf>,
 }
 
 impl GitDirectoriesDelegate {
-    fn new(workspace: WeakEntity<Workspace>, create_new_window: bool) -> Self {
+    fn new(
+        workspace: WeakEntity<Workspace>,
+        create_new_window: bool,
+        scan_directory: Option<String>,
+    ) -> Self {
         Self {
             workspace,
             directories: Vec::new(),
             selected_match_index: 0,
             matches: Default::default(),
             create_new_window,
+            scan_directory: scan_directory.map(PathBuf::from),
         }
     }
 
@@ -292,8 +327,11 @@ impl PickerDelegate for GitDirectoriesDelegate {
 
     fn no_matches_text(&self, _window: &mut Window, _cx: &mut App) -> Option<SharedString> {
         let text = if self.directories.is_empty() {
-            "No git directories found in ~/git (create ~/git directory and clone some repositories)"
-                .into()
+            if let Some(dir) = &self.scan_directory {
+                format!("No git directories found in {} (create the directory and clone some repositories)", dir.display()).into()
+            } else {
+                "No git directories found in ~/git (create ~/git directory and clone some repositories)".into()
+            }
         } else {
             "No matches".into()
         };
@@ -441,62 +479,103 @@ async fn is_likely_git_repo(path: &Path) -> bool {
     false
 }
 
+/// Expands environment variables in a path string
+/// Currently supports $HOME and $USER variables
+fn expand_path(path: &str) -> String {
+    let mut expanded = path.to_string();
+
+    // Expand $HOME
+    if let Some(home_dir) = dirs::home_dir() {
+        if let Some(home_str) = home_dir.to_str() {
+            expanded = expanded.replace("$HOME", home_str);
+        }
+    }
+
+    // Expand $USER
+    if let Ok(user) = std::env::var("USER") {
+        expanded = expanded.replace("$USER", &user);
+    }
+
+    expanded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
 
-    #[gpui::test]
-    async fn test_scan_git_directories_empty_dir() {
+    #[test]
+    fn test_scan_git_directories_empty_dir() {
         let temp_dir = TempDir::new().unwrap();
-        let result = scan_git_directories(temp_dir.path()).await.unwrap();
+        let result = smol::block_on(scan_git_directories(temp_dir.path())).unwrap();
         assert!(result.is_empty());
     }
 
-    #[gpui::test]
-    async fn test_scan_git_directories_with_git_repo() {
+    #[test]
+    fn test_scan_git_directories_with_git_repo() {
         let temp_dir = TempDir::new().unwrap();
         let git_repo_path = temp_dir.path().join("test-repo");
         fs::create_dir(&git_repo_path).unwrap();
         fs::create_dir(git_repo_path.join(".git")).unwrap();
 
-        let result = scan_git_directories(temp_dir.path()).await.unwrap();
+        let result = smol::block_on(scan_git_directories(temp_dir.path())).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], git_repo_path);
     }
 
-    #[gpui::test]
-    async fn test_scan_git_directories_with_source_files() {
+    #[test]
+    fn test_scan_git_directories_with_source_files() {
         let temp_dir = TempDir::new().unwrap();
         let project_path = temp_dir.path().join("rust-project");
         fs::create_dir(&project_path).unwrap();
         fs::write(project_path.join("main.rs"), "fn main() {}").unwrap();
 
-        let result = scan_git_directories(temp_dir.path()).await.unwrap();
+        let result = smol::block_on(scan_git_directories(temp_dir.path())).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], project_path);
     }
 
-    #[gpui::test]
-    async fn test_scan_git_directories_skips_hidden() {
+    #[test]
+    fn test_scan_git_directories_skips_hidden() {
         let temp_dir = TempDir::new().unwrap();
         let hidden_dir = temp_dir.path().join(".hidden");
         fs::create_dir(&hidden_dir).unwrap();
         fs::create_dir(hidden_dir.join(".git")).unwrap();
 
-        let result = scan_git_directories(temp_dir.path()).await.unwrap();
+        let result = smol::block_on(scan_git_directories(temp_dir.path())).unwrap();
         assert!(result.is_empty());
     }
 
-    #[test]
+    #[gpui::test]
     fn test_git_directories_delegate_creation() {
-        gpui::App::test((), |cx| {
-            let delegate = GitDirectoriesDelegate::new(WeakEntity::invalid(), false);
-            assert_eq!(delegate.directories.len(), 0);
-            assert_eq!(delegate.matches.len(), 0);
-            assert_eq!(delegate.selected_match_index, 0);
-            assert!(!delegate.create_new_window);
-        });
+        let delegate = GitDirectoriesDelegate::new(WeakEntity::new_invalid(), false, None);
+        assert_eq!(delegate.directories.len(), 0);
+        assert_eq!(delegate.matches.len(), 0);
+        assert_eq!(delegate.selected_match_index, 0);
+        assert!(!delegate.create_new_window);
+        assert!(delegate.scan_directory.is_none());
+    }
+
+    #[test]
+    fn test_expand_path() {
+        // Test HOME expansion
+        if let Some(home_dir) = dirs::home_dir() {
+            if let Some(home_str) = home_dir.to_str() {
+                assert_eq!(
+                    expand_path("$HOME/projects"),
+                    format!("{}/projects", home_str)
+                );
+                assert_eq!(expand_path("/some/path"), "/some/path");
+            }
+        }
+
+        // Test USER expansion
+        if let Ok(user) = std::env::var("USER") {
+            assert_eq!(
+                expand_path("/home/$USER/git"),
+                format!("/home/{}/git", user)
+            );
+        }
     }
 }
