@@ -4,11 +4,11 @@
     // Default git directory scanner (scans ~/git)
     "alt-cmd-g": ["projects::OpenGitDirectory", { "create_new_window": false }],
 
-    // Custom git directory examples
+    // Custom single git directory examples
     "alt-cmd-shift-g": [
       "projects::OpenGitDirectory",
       {
-        "directory": "/path/to/your/projects",
+        "directories": ["/path/to/your/projects"],
         "create_new_window": false
       }
     ],
@@ -17,7 +17,16 @@
     "ctrl-cmd-g": [
       "projects::OpenGitDirectory",
       {
-        "directory": "$HOME/dev",
+        "directories": ["$HOME/dev"],
+        "create_new_window": false
+      }
+    ],
+
+    // Multiple directories in a single action - scans all specified directories
+    "alt-cmd-shift-m": [
+      "projects::OpenGitDirectory",
+      {
+        "directories": ["$HOME/work", "$HOME/personal", "/usr/local/src"],
         "create_new_window": false
       }
     ],
@@ -26,7 +35,7 @@
     "alt-cmd-1": [
       "projects::OpenGitDirectory",
       {
-        "directory": "$HOME/work",
+        "directories": ["$HOME/work"],
         "create_new_window": false
       }
     ],
@@ -34,7 +43,7 @@
     "alt-cmd-2": [
       "projects::OpenGitDirectory",
       {
-        "directory": "$HOME/personal",
+        "directories": ["$HOME/personal"],
         "create_new_window": false
       }
     ],
@@ -42,7 +51,7 @@
     "alt-cmd-3": [
       "projects::OpenGitDirectory",
       {
-        "directory": "/usr/local/src",
+        "directories": ["/usr/local/src"],
         "create_new_window": false
       }
     ],
@@ -51,7 +60,7 @@
     "alt-cmd-shift-1": [
       "projects::OpenGitDirectory",
       {
-        "directory": "$HOME/work",
+        "directories": ["$HOME/work"],
         "create_new_window": true
       }
     ],
@@ -59,7 +68,16 @@
     "alt-cmd-shift-2": [
       "projects::OpenGitDirectory",
       {
-        "directory": "$HOME/personal",
+        "directories": ["$HOME/personal"],
+        "create_new_window": true
+      }
+    ],
+
+    // Multiple directories in new window
+    "alt-cmd-shift-ctrl-m": [
+      "projects::OpenGitDirectory",
+      {
+        "directories": ["$HOME/work", "$HOME/personal", "/usr/local/src"],
         "create_new_window": true
       }
     ]
