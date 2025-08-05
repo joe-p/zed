@@ -112,7 +112,13 @@ impl GitDirectories {
             let scan_dirs = if let Some(custom_dirs) = directories {
                 custom_dirs
                     .into_iter()
-                    .map(|dir| PathBuf::from(expand_path(&dir)))
+                    .map(|dir| {
+                        PathBuf::from(
+                            shellexpand::full(&dir)
+                                .unwrap_or_else(|_| dir.clone().into())
+                                .into_owned(),
+                        )
+                    })
                     .collect::<Vec<_>>()
             } else {
                 match dirs::home_dir() {
@@ -211,7 +217,13 @@ impl GitDirectoriesDelegate {
             scan_directories: scan_directories
                 .unwrap_or_else(|| vec!["~/git".to_string()])
                 .into_iter()
-                .map(|d| PathBuf::from(expand_path(&d)))
+                .map(|d| {
+                    PathBuf::from(
+                        shellexpand::full(&d)
+                            .unwrap_or_else(|_| d.clone().into())
+                            .into_owned(),
+                    )
+                })
                 .collect(),
         }
     }
@@ -494,41 +506,6 @@ async fn is_likely_git_repo(path: &Path) -> bool {
     false
 }
 
-/// Expands environment variables in a path string
-/// Currently supports $HOME and $USER variables
-fn expand_path(path: &str) -> String {
-    let mut expanded = path.to_string();
-
-    // Expand ~ at the beginning of the path
-    if expanded.starts_with("~/") {
-        if let Some(home_dir) = dirs::home_dir() {
-            if let Some(home_str) = home_dir.to_str() {
-                expanded = expanded.replacen("~/", &format!("{}/", home_str), 1);
-            }
-        }
-    } else if expanded == "~" {
-        if let Some(home_dir) = dirs::home_dir() {
-            if let Some(home_str) = home_dir.to_str() {
-                expanded = home_str.to_string();
-            }
-        }
-    }
-
-    // Expand $HOME
-    if let Some(home_dir) = dirs::home_dir() {
-        if let Some(home_str) = home_dir.to_str() {
-            expanded = expanded.replace("$HOME", home_str);
-        }
-    }
-
-    // Expand $USER
-    if let Ok(user) = std::env::var("USER") {
-        expanded = expanded.replace("$USER", &user);
-    }
-
-    expanded
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,21 +627,27 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_path() {
+    fn test_path_expansion() {
         // Test tilde expansion
         if let Some(home_dir) = dirs::home_dir() {
             if let Some(home_str) = home_dir.to_str() {
-                assert_eq!(expand_path("~/projects"), format!("{}/projects", home_str));
-                assert_eq!(expand_path("~"), home_str);
-                assert_eq!(expand_path("~/"), format!("{}/", home_str));
+                let expand = |path: &str| {
+                    shellexpand::full(path)
+                        .unwrap_or_else(|_| path.into())
+                        .to_string()
+                };
+
+                assert_eq!(expand("~/projects"), format!("{}/projects", home_str));
+                assert_eq!(expand("~"), home_str);
+                assert_eq!(expand("~/"), format!("{}/", home_str));
                 assert_eq!(
-                    expand_path("~/Documents/code"),
+                    expand("~/Documents/code"),
                     format!("{}/Documents/code", home_str)
                 );
 
                 // Test that tilde only expands at the beginning
                 assert_eq!(
-                    expand_path("/some/path~/not_expanded"),
+                    expand("/some/path~/not_expanded"),
                     "/some/path~/not_expanded"
                 );
             }
@@ -673,20 +656,26 @@ mod tests {
         // Test HOME expansion
         if let Some(home_dir) = dirs::home_dir() {
             if let Some(home_str) = home_dir.to_str() {
-                assert_eq!(
-                    expand_path("$HOME/projects"),
-                    format!("{}/projects", home_str)
-                );
-                assert_eq!(expand_path("/some/path"), "/some/path");
+                let expand = |path: &str| {
+                    shellexpand::full(path)
+                        .unwrap_or_else(|_| path.into())
+                        .to_string()
+                };
+
+                assert_eq!(expand("$HOME/projects"), format!("{}/projects", home_str));
+                assert_eq!(expand("/some/path"), "/some/path");
             }
         }
 
         // Test USER expansion
         if let Ok(user) = std::env::var("USER") {
-            assert_eq!(
-                expand_path("/home/$USER/git"),
-                format!("/home/{}/git", user)
-            );
+            let expand = |path: &str| {
+                shellexpand::full(path)
+                    .unwrap_or_else(|_| path.into())
+                    .to_string()
+            };
+
+            assert_eq!(expand("/home/$USER/git"), format!("/home/{}/git", user));
         }
     }
 }
