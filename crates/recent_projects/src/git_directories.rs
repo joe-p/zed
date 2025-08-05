@@ -499,6 +499,21 @@ async fn is_likely_git_repo(path: &Path) -> bool {
 fn expand_path(path: &str) -> String {
     let mut expanded = path.to_string();
 
+    // Expand ~ at the beginning of the path
+    if expanded.starts_with("~/") {
+        if let Some(home_dir) = dirs::home_dir() {
+            if let Some(home_str) = home_dir.to_str() {
+                expanded = expanded.replacen("~/", &format!("{}/", home_str), 1);
+            }
+        }
+    } else if expanded == "~" {
+        if let Some(home_dir) = dirs::home_dir() {
+            if let Some(home_str) = home_dir.to_str() {
+                expanded = home_str.to_string();
+            }
+        }
+    }
+
     // Expand $HOME
     if let Some(home_dir) = dirs::home_dir() {
         if let Some(home_str) = home_dir.to_str() {
@@ -636,6 +651,25 @@ mod tests {
 
     #[test]
     fn test_expand_path() {
+        // Test tilde expansion
+        if let Some(home_dir) = dirs::home_dir() {
+            if let Some(home_str) = home_dir.to_str() {
+                assert_eq!(expand_path("~/projects"), format!("{}/projects", home_str));
+                assert_eq!(expand_path("~"), home_str);
+                assert_eq!(expand_path("~/"), format!("{}/", home_str));
+                assert_eq!(
+                    expand_path("~/Documents/code"),
+                    format!("{}/Documents/code", home_str)
+                );
+
+                // Test that tilde only expands at the beginning
+                assert_eq!(
+                    expand_path("/some/path~/not_expanded"),
+                    "/some/path~/not_expanded"
+                );
+            }
+        }
+
         // Test HOME expansion
         if let Some(home_dir) = dirs::home_dir() {
             if let Some(home_str) = home_dir.to_str() {
