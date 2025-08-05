@@ -370,6 +370,15 @@ pub struct OpenRemote {
     pub create_new_window: bool,
 }
 
+/// Opens the git directories interface.
+#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+#[action(namespace = projects)]
+#[serde(deny_unknown_fields)]
+pub struct OpenGitDirectory {
+    #[serde(default)]
+    pub create_new_window: bool,
+}
+
 /// Where to spawn the task in the UI.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

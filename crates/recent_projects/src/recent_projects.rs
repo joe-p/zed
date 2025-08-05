@@ -1,8 +1,10 @@
 pub mod disconnected_overlay;
+mod git_directories;
 mod remote_servers;
 mod ssh_config;
 mod ssh_connections;
 
+pub use git_directories::GitDirectories;
 pub use ssh_connections::{is_connecting_over_ssh, open_ssh_project};
 
 use disconnected_overlay::DisconnectedOverlay;
@@ -33,6 +35,7 @@ use zed_actions::{OpenRecent, OpenRemote};
 
 pub fn init(cx: &mut App) {
     SshSettings::register(cx);
+    git_directories::init(cx);
     cx.on_action(|open_recent: &OpenRecent, cx| {
         let create_new_window = open_recent.create_new_window;
         with_active_or_new_workspace(cx, move |workspace, window, cx| {
