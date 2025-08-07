@@ -62,7 +62,6 @@ use menu;
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
 use std::{
-    ffi::OsStr,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
 };
@@ -108,7 +107,7 @@ impl GitDirectories {
         let picker = cx.new(|cx| Picker::uniform_list(delegate, window, cx));
         let _subscription = cx.subscribe(&picker, |_, _, _, cx| cx.emit(DismissEvent));
 
-        // Spawn task to scan git directories
+        // Spawn task to scan git directories incrementally
         cx.spawn_in(window, async move |this, cx| {
             let scan_dirs = directories
                 .into_iter()
@@ -126,14 +125,22 @@ impl GitDirectories {
                 .map(|dir| dir.as_path())
                 .collect::<Vec<_>>();
 
-            let all_directories = scan_git_directories(&scan_dir_refs).unwrap_or_default();
-            this.update_in(cx, move |this, window, cx| {
-                this.picker.update(cx, move |picker, cx| {
-                    picker.delegate.set_directories(all_directories);
-                    picker.update_matches(picker.query(cx), window, cx)
-                })
-            })
-            .ok()
+            if let Ok(rx) = scan_git_directories_streaming(&scan_dir_refs) {
+                while let Ok(directory) = rx.recv() {
+                    let dir_clone = directory.clone();
+                    if this
+                        .update_in(cx, move |this, window, cx| {
+                            this.picker.update(cx, move |picker, cx| {
+                                picker.delegate.add_directory(dir_clone);
+                                picker.update_matches(picker.query(cx), window, cx)
+                            })
+                        })
+                        .is_err()
+                    {
+                        break; // Entity was dropped, stop processing
+                    }
+                }
+            }
         })
         .detach();
 
@@ -217,6 +224,20 @@ impl GitDirectoriesDelegate {
 
     pub fn set_directories(&mut self, directories: Vec<PathBuf>) {
         self.directories = directories;
+    }
+
+    pub fn add_directory(&mut self, directory: PathBuf) {
+        // Insert in sorted order
+        let insert_pos = self
+            .directories
+            .binary_search_by(|existing| {
+                let existing_name = existing.file_name().unwrap_or_default();
+                let new_name = directory.file_name().unwrap_or_default();
+                existing_name.cmp(new_name)
+            })
+            .unwrap_or_else(|pos| pos);
+
+        self.directories.insert(insert_pos, directory);
     }
 }
 
@@ -388,9 +409,10 @@ impl PickerDelegate for GitDirectoriesDelegate {
     }
 }
 
-fn scan_git_directories(git_paths: &[&Path]) -> Result<Vec<PathBuf>, std::io::Error> {
+fn scan_git_directories_streaming(
+    git_paths: &[&Path],
+) -> Result<std::sync::mpsc::Receiver<PathBuf>, std::io::Error> {
     let mut git_paths_iter = git_paths.iter();
-    let mut directories = Vec::new();
 
     // Use WalkBuilder to scan only immediate subdirectories
     let mut walk_builder = WalkBuilder::new(
@@ -407,56 +429,76 @@ fn scan_git_directories(git_paths: &[&Path]) -> Result<Vec<PathBuf>, std::io::Er
 
     let walker = walk_builder.build_parallel();
 
-    let (tx, rx) = mpsc::channel::<Result<PathBuf, std::io::Error>>();
+    let (tx, rx) = mpsc::channel::<PathBuf>();
+    let (internal_tx, internal_rx) = mpsc::channel::<Result<PathBuf, std::io::Error>>();
 
-    walker.run(|| {
-        let tx = tx.clone();
-        Box::new(move |result| {
-            match result {
-                Ok(entry) => {
-                    let path = entry.path();
-                    if path.join(".git").exists() {
-                        if let Err(e) = tx.send(Ok(path.to_path_buf())) {
-                            log::error!("Failed to send directory path {}: {}", path.display(), e);
+    // Spawn the walker in a separate thread
+    std::thread::spawn(move || {
+        walker.run(|| {
+            let internal_tx = internal_tx.clone();
+            Box::new(move |result| {
+                match result {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        if path.join(".git").exists() {
+                            if let Err(e) = internal_tx.send(Ok(path.to_path_buf())) {
+                                log::error!(
+                                    "Failed to send directory path {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                            }
+
+                            return ignore::WalkState::Skip;
                         }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to read directory entry {}", e);
+                        if let Err(send_err) =
+                            internal_tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                        {
+                            log::error!("Failed to send error: {}", send_err);
+                        }
+                    }
+                }
+                ignore::WalkState::Continue
+            })
+        });
 
-                        return ignore::WalkState::Skip;
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to read directory entry {}", e);
-                    if let Err(send_err) =
-                        tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
-                    {
-                        log::error!("Failed to send error: {}", send_err);
-                    }
-                }
-            }
-            ignore::WalkState::Continue
-        })
+        // Drop the original sender to signal completion
+        drop(internal_tx);
     });
 
-    // Drop the original sender to signal completion
-    drop(tx);
+    // Process results and send them sorted
+    std::thread::spawn(move || {
+        let mut directories = Vec::new();
 
-    // Collect results
-    for result in rx {
-        match result {
-            Ok(path) => directories.push(path),
-            Err(e) => {
-                log::error!("Error during directory scan: {}", e);
+        // Collect all results first
+        for result in internal_rx {
+            match result {
+                Ok(path) => directories.push(path),
+                Err(e) => {
+                    log::error!("Error during directory scan: {}", e);
+                }
             }
         }
-    }
 
-    // Sort directories by name
-    directories.sort_by(|a, b| {
-        let a_name = a.file_name().unwrap_or_default();
-        let b_name = b.file_name().unwrap_or_default();
-        a_name.cmp(b_name)
+        // Sort directories by name
+        directories.sort_by(|a, b| {
+            let a_name = a.file_name().unwrap_or_default();
+            let b_name = b.file_name().unwrap_or_default();
+            a_name.cmp(b_name)
+        });
+
+        // Send sorted results
+        for directory in directories {
+            if tx.send(directory).is_err() {
+                break; // Receiver was dropped
+            }
+        }
     });
 
-    Ok(directories)
+    Ok(rx)
 }
 
 #[cfg(test)]
@@ -465,10 +507,19 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn collect_streaming_results(git_paths: &[&Path]) -> Vec<PathBuf> {
+        let rx = scan_git_directories_streaming(git_paths).unwrap();
+        let mut directories = Vec::new();
+        while let Ok(directory) = rx.recv() {
+            directories.push(directory);
+        }
+        directories
+    }
+
     #[test]
     fn test_scan_git_directories_empty_dir() {
         let temp_dir = TempDir::new().unwrap();
-        let result = scan_git_directories(&[temp_dir.path()]).unwrap();
+        let result = collect_streaming_results(&[temp_dir.path()]);
         assert!(result.is_empty());
     }
 
@@ -479,7 +530,7 @@ mod tests {
         fs::create_dir(&git_repo_path).unwrap();
         fs::create_dir(git_repo_path.join(".git")).unwrap();
 
-        let result = scan_git_directories(&[temp_dir.path()]).unwrap();
+        let result = collect_streaming_results(&[temp_dir.path()]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], git_repo_path);
     }
@@ -492,7 +543,7 @@ mod tests {
         fs::create_dir(project_path.join(".git")).unwrap();
         fs::write(project_path.join("main.rs"), "fn main() {}").unwrap();
 
-        let result = scan_git_directories(&[temp_dir.path()]).unwrap();
+        let result = collect_streaming_results(&[temp_dir.path()]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], project_path);
     }
@@ -532,6 +583,24 @@ mod tests {
                 .to_string_lossy()
                 .ends_with("personal")
         );
+    }
+
+    #[test]
+    fn test_add_directory_sorted_insertion() {
+        let mut delegate = GitDirectoriesDelegate::new(WeakEntity::new_invalid(), false, vec![]);
+
+        // Add directories in non-alphabetical order
+        delegate.add_directory(PathBuf::from("/path/to/zebra"));
+        delegate.add_directory(PathBuf::from("/path/to/alpha"));
+        delegate.add_directory(PathBuf::from("/path/to/beta"));
+        delegate.add_directory(PathBuf::from("/path/to/charlie"));
+
+        // Verify they are stored in alphabetical order by directory name
+        assert_eq!(delegate.directories.len(), 4);
+        assert_eq!(delegate.directories[0], PathBuf::from("/path/to/alpha"));
+        assert_eq!(delegate.directories[1], PathBuf::from("/path/to/beta"));
+        assert_eq!(delegate.directories[2], PathBuf::from("/path/to/charlie"));
+        assert_eq!(delegate.directories[3], PathBuf::from("/path/to/zebra"));
     }
 
     #[test]
