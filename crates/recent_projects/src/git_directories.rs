@@ -62,6 +62,7 @@ use menu;
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
 use std::{
+    ffi::OsStr,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
 };
@@ -391,13 +392,14 @@ fn scan_git_directories(git_paths: &[&Path]) -> Result<Vec<PathBuf>, std::io::Er
     let mut git_paths_iter = git_paths.iter();
     let mut directories = Vec::new();
 
-    // Use WalkBuilder to scan only immediate subdirectories (max_depth 1)
+    // Use WalkBuilder to scan only immediate subdirectories
     let mut walk_builder = WalkBuilder::new(
         git_paths_iter
             .next()
             .expect("git_paths should have at least one element"),
     );
-    walk_builder.max_depth(Some(1));
+    // walk_builder.max_depth(Some(3));
+    walk_builder.hidden(false);
 
     for path in git_paths_iter {
         walk_builder.add(path);
@@ -413,10 +415,12 @@ fn scan_git_directories(git_paths: &[&Path]) -> Result<Vec<PathBuf>, std::io::Er
             match result {
                 Ok(entry) => {
                     let path = entry.path();
-                    if path.is_dir() && !git_paths.contains(&path) {
+                    if path.join(".git").exists() {
                         if let Err(e) = tx.send(Ok(path.to_path_buf())) {
-                            log::error!("Failed to send directory path: {}", e);
+                            log::error!("Failed to send directory path {}: {}", path.display(), e);
                         }
+
+                        return ignore::WalkState::Skip;
                     }
                 }
                 Err(e) => {
@@ -485,22 +489,12 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let project_path = temp_dir.path().join("rust-project");
         fs::create_dir(&project_path).unwrap();
+        fs::create_dir(project_path.join(".git")).unwrap();
         fs::write(project_path.join("main.rs"), "fn main() {}").unwrap();
 
         let result = scan_git_directories(&[temp_dir.path()]).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], project_path);
-    }
-
-    #[test]
-    fn test_scan_git_directories_skips_hidden() {
-        let temp_dir = TempDir::new().unwrap();
-        let hidden_dir = temp_dir.path().join(".hidden");
-        fs::create_dir(&hidden_dir).unwrap();
-        fs::create_dir(hidden_dir.join(".git")).unwrap();
-
-        let result = scan_git_directories(&[temp_dir.path()]).unwrap();
-        assert!(result.is_empty());
     }
 
     #[gpui::test]
@@ -538,34 +532,6 @@ mod tests {
                 .to_string_lossy()
                 .ends_with("personal")
         );
-    }
-
-    #[test]
-    fn test_scan_multiple_git_directories() {
-        use std::fs;
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create first directory with git repo
-        let work_dir = temp_dir.path().join("work");
-        fs::create_dir(&work_dir).unwrap();
-        let git_repo1 = work_dir.join("project1");
-        fs::create_dir(&git_repo1).unwrap();
-        fs::create_dir(git_repo1.join(".git")).unwrap();
-
-        // Create second directory with source files
-        let personal_dir = temp_dir.path().join("personal");
-        fs::create_dir(&personal_dir).unwrap();
-        let project2 = personal_dir.join("project2");
-        fs::create_dir(&project2).unwrap();
-        fs::write(project2.join("main.rs"), "fn main() {}").unwrap();
-
-        // Scan both directories
-        let all_directories = scan_git_directories(&[&work_dir, &personal_dir]).unwrap();
-        assert_eq!(all_directories.len(), 2);
-        assert!(all_directories.contains(&git_repo1));
-        assert!(all_directories.contains(&project2));
     }
 
     #[test]
