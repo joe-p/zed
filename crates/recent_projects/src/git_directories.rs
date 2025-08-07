@@ -420,7 +420,6 @@ fn scan_git_directories_streaming(
             .next()
             .expect("git_paths should have at least one element"),
     );
-    // walk_builder.max_depth(Some(3));
     walk_builder.hidden(false);
 
     for path in git_paths_iter {
@@ -430,18 +429,17 @@ fn scan_git_directories_streaming(
     let walker = walk_builder.build_parallel();
 
     let (tx, rx) = mpsc::channel::<PathBuf>();
-    let (internal_tx, internal_rx) = mpsc::channel::<Result<PathBuf, std::io::Error>>();
 
     // Spawn the walker in a separate thread
     std::thread::spawn(move || {
         walker.run(|| {
-            let internal_tx = internal_tx.clone();
+            let tx = tx.clone();
             Box::new(move |result| {
                 match result {
                     Ok(entry) => {
                         let path = entry.path();
                         if path.join(".git").exists() {
-                            if let Err(e) = internal_tx.send(Ok(path.to_path_buf())) {
+                            if let Err(e) = tx.send(path.to_path_buf()) {
                                 log::error!(
                                     "Failed to send directory path {}: {}",
                                     path.display(),
@@ -454,11 +452,6 @@ fn scan_git_directories_streaming(
                     }
                     Err(e) => {
                         log::error!("Failed to read directory entry {}", e);
-                        if let Err(send_err) =
-                            internal_tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
-                        {
-                            log::error!("Failed to send error: {}", send_err);
-                        }
                     }
                 }
                 ignore::WalkState::Continue
@@ -466,36 +459,7 @@ fn scan_git_directories_streaming(
         });
 
         // Drop the original sender to signal completion
-        drop(internal_tx);
-    });
-
-    // Process results and send them sorted
-    std::thread::spawn(move || {
-        let mut directories = Vec::new();
-
-        // Collect all results first
-        for result in internal_rx {
-            match result {
-                Ok(path) => directories.push(path),
-                Err(e) => {
-                    log::error!("Error during directory scan: {}", e);
-                }
-            }
-        }
-
-        // Sort directories by name
-        directories.sort_by(|a, b| {
-            let a_name = a.file_name().unwrap_or_default();
-            let b_name = b.file_name().unwrap_or_default();
-            a_name.cmp(b_name)
-        });
-
-        // Send sorted results
-        for directory in directories {
-            if tx.send(directory).is_err() {
-                break; // Receiver was dropped
-            }
-        }
+        drop(tx);
     });
 
     Ok(rx)
@@ -504,7 +468,7 @@ fn scan_git_directories_streaming(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{collections::HashSet, fs};
     use tempfile::TempDir;
 
     fn collect_streaming_results(git_paths: &[&Path]) -> Vec<PathBuf> {
@@ -601,6 +565,47 @@ mod tests {
         assert_eq!(delegate.directories[1], PathBuf::from("/path/to/beta"));
         assert_eq!(delegate.directories[2], PathBuf::from("/path/to/charlie"));
         assert_eq!(delegate.directories[3], PathBuf::from("/path/to/zebra"));
+    }
+
+    #[test]
+    fn test_streaming_scan_git_directories() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create multiple git repositories
+        let repo1_path = temp_dir.path().join("repo-alpha");
+        let repo2_path = temp_dir.path().join("repo-beta");
+        let repo3_path = temp_dir.path().join("repo-gamma");
+
+        fs::create_dir(&repo1_path).unwrap();
+        fs::create_dir(repo1_path.join(".git")).unwrap();
+
+        fs::create_dir(&repo2_path).unwrap();
+        fs::create_dir(repo2_path.join(".git")).unwrap();
+
+        fs::create_dir(&repo3_path).unwrap();
+        fs::create_dir(repo3_path.join(".git")).unwrap();
+
+        // Test that streaming returns results
+        let rx = scan_git_directories_streaming(&[temp_dir.path()]).unwrap();
+        let mut received_dirs = Vec::new();
+
+        // Collect results as they come in
+        while let Ok(directory) = rx.recv() {
+            received_dirs.push(directory);
+        }
+
+        // Should have found all 3 repositories
+        assert_eq!(received_dirs.len(), 3);
+
+        // Verify all expected directories are present (order may vary due to parallel walker)
+        let received_names: HashSet<_> = received_dirs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+
+        assert!(received_names.contains("repo-alpha"));
+        assert!(received_names.contains("repo-beta"));
+        assert!(received_names.contains("repo-gamma"));
     }
 
     #[test]
