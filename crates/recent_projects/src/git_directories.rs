@@ -60,12 +60,12 @@ use gpui::{
 use menu;
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
-use smol::stream::StreamExt;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
 use ui::{Color, Icon, IconName, Label, LabelSize, ListItem, ListItemSpacing, prelude::*};
+use walkdir::WalkDir;
 use workspace::{ModalView, Workspace, with_active_or_new_workspace};
 use zed_actions::OpenGitDirectory;
 
@@ -391,8 +391,6 @@ impl PickerDelegate for GitDirectoriesDelegate {
 }
 
 async fn scan_git_directories(git_path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
-    use smol::fs;
-
     if !git_path.exists() {
         log::debug!("Git path does not exist: {}", git_path.display());
         return Ok(Vec::new());
@@ -404,32 +402,33 @@ async fn scan_git_directories(git_path: &Path) -> Result<Vec<PathBuf>, std::io::
     }
 
     let mut directories = Vec::new();
-    let mut entries = match fs::read_dir(git_path).await {
-        Ok(entries) => entries,
-        Err(e) => {
-            log::error!("Failed to read git directory {}: {}", git_path.display(), e);
-            return Err(e);
-        }
-    };
 
-    while let Some(entry) = entries.next().await {
-        let entry = entry?;
+    // Use WalkDir to scan only immediate subdirectories (max_depth 1)
+    for entry in WalkDir::new(git_path)
+        .min_depth(1) // Skip the git_path
+        .max_depth(1) // Only scan immediate subdirectories
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip hidden directories
+            !e.file_name().to_string_lossy().starts_with('.')
+        })
+    {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                log::error!(
+                    "Failed to read directory entry in {}: {}",
+                    git_path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
         let path = entry.path();
 
         if path.is_dir() {
-            // Skip hidden directories (starting with .)
-            if let Some(file_name) = path.file_name() {
-                if !file_name.to_string_lossy().starts_with('.') {
-                    // Check if this directory contains a .git subdirectory or is a git repository
-                    let git_dir = path.join(".git");
-                    if git_dir.exists() || is_likely_git_repo(&path).await {
-                        directories.push(path);
-                    } else {
-                        // If it's not a git repo, add it anyway as it might contain projects
-                        directories.push(path);
-                    }
-                }
-            }
+            directories.push(path.to_path_buf());
         }
     }
 
@@ -441,58 +440,6 @@ async fn scan_git_directories(git_path: &Path) -> Result<Vec<PathBuf>, std::io::
     });
 
     Ok(directories)
-}
-
-async fn is_likely_git_repo(path: &Path) -> bool {
-    use smol::fs;
-
-    // Check for common git-related files/directories
-    let git_indicators = [
-        ".git",
-        ".gitignore",
-        ".gitmodules",
-        "README.md",
-        "README.txt",
-    ];
-
-    for indicator in &git_indicators {
-        if path.join(indicator).exists() {
-            return true;
-        }
-    }
-
-    // Check if it contains source code files (common extensions)
-    if let Ok(mut entries) = fs::read_dir(path).await {
-        while let Some(Ok(entry)) = entries.next().await {
-            if let Some(extension) = entry.path().extension() {
-                let ext = extension.to_string_lossy().to_lowercase();
-                if matches!(
-                    ext.as_str(),
-                    "rs" | "js"
-                        | "ts"
-                        | "py"
-                        | "go"
-                        | "java"
-                        | "cpp"
-                        | "c"
-                        | "h"
-                        | "swift"
-                        | "kt"
-                        | "rb"
-                        | "php"
-                        | "cs"
-                        | "dart"
-                        | "vue"
-                        | "jsx"
-                        | "tsx"
-                ) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
 }
 
 #[cfg(test)]
