@@ -120,15 +120,12 @@ impl GitDirectories {
                 })
                 .collect::<Vec<_>>();
 
-            let mut all_directories = Vec::new();
-            for scan_dir in scan_dirs {
-                if scan_dir.exists() && scan_dir.is_dir() {
-                    let mut found_dirs = scan_git_directories(&scan_dir).unwrap_or_default();
-                    all_directories.append(&mut found_dirs);
-                } else {
-                    log::info!("Directory not found at {}", scan_dir.display());
-                }
-            }
+            let scan_dir_refs = scan_dirs
+                .iter()
+                .map(|dir| dir.as_path())
+                .collect::<Vec<_>>();
+
+            let all_directories = scan_git_directories(&scan_dir_refs).unwrap_or_default();
             this.update_in(cx, move |this, window, cx| {
                 this.picker.update(cx, move |picker, cx| {
                     picker.delegate.set_directories(all_directories);
@@ -390,47 +387,40 @@ impl PickerDelegate for GitDirectoriesDelegate {
     }
 }
 
-fn scan_git_directories(git_path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
-    if !git_path.exists() {
-        log::debug!("Git path does not exist: {}", git_path.display());
-        return Ok(Vec::new());
-    }
-
-    if !git_path.is_dir() {
-        log::warn!("Git path is not a directory: {}", git_path.display());
-        return Ok(Vec::new());
-    }
-
+fn scan_git_directories(git_paths: &[&Path]) -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut git_paths_iter = git_paths.iter();
     let mut directories = Vec::new();
 
     // Use WalkBuilder to scan only immediate subdirectories (max_depth 1)
-    let git_path_clone = git_path.to_path_buf();
-    let walker = WalkBuilder::new(git_path)
-        .max_depth(Some(1))
-        .build_parallel();
+    let mut walk_builder = WalkBuilder::new(
+        git_paths_iter
+            .next()
+            .expect("git_paths should have at least one element"),
+    );
+    walk_builder.max_depth(Some(1));
+
+    for path in git_paths_iter {
+        walk_builder.add(path);
+    }
+
+    let walker = walk_builder.build_parallel();
 
     let (tx, rx) = mpsc::channel::<Result<PathBuf, std::io::Error>>();
 
     walker.run(|| {
         let tx = tx.clone();
-        let git_path_clone = git_path_clone.clone();
         Box::new(move |result| {
             match result {
                 Ok(entry) => {
                     let path = entry.path();
-                    // Only include directories that are direct children (depth 1) and not the root path itself
-                    if path.is_dir() && path != git_path_clone {
+                    if path.is_dir() && !git_paths.contains(&path) {
                         if let Err(e) = tx.send(Ok(path.to_path_buf())) {
                             log::error!("Failed to send directory path: {}", e);
                         }
                     }
                 }
                 Err(e) => {
-                    log::error!(
-                        "Failed to read directory entry in {}: {}",
-                        git_path_clone.display(),
-                        e
-                    );
+                    log::error!("Failed to read directory entry {}", e);
                     if let Err(send_err) =
                         tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
                     {
@@ -474,7 +464,7 @@ mod tests {
     #[test]
     fn test_scan_git_directories_empty_dir() {
         let temp_dir = TempDir::new().unwrap();
-        let result = scan_git_directories(temp_dir.path()).unwrap();
+        let result = scan_git_directories(&[temp_dir.path()]).unwrap();
         assert!(result.is_empty());
     }
 
@@ -485,7 +475,7 @@ mod tests {
         fs::create_dir(&git_repo_path).unwrap();
         fs::create_dir(git_repo_path.join(".git")).unwrap();
 
-        let result = scan_git_directories(temp_dir.path()).unwrap();
+        let result = scan_git_directories(&[temp_dir.path()]).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], git_repo_path);
     }
@@ -497,7 +487,7 @@ mod tests {
         fs::create_dir(&project_path).unwrap();
         fs::write(project_path.join("main.rs"), "fn main() {}").unwrap();
 
-        let result = scan_git_directories(temp_dir.path()).unwrap();
+        let result = scan_git_directories(&[temp_dir.path()]).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], project_path);
     }
@@ -509,7 +499,7 @@ mod tests {
         fs::create_dir(&hidden_dir).unwrap();
         fs::create_dir(hidden_dir.join(".git")).unwrap();
 
-        let result = scan_git_directories(temp_dir.path()).unwrap();
+        let result = scan_git_directories(&[temp_dir.path()]).unwrap();
         assert!(result.is_empty());
     }
 
@@ -572,14 +562,7 @@ mod tests {
         fs::write(project2.join("main.rs"), "fn main() {}").unwrap();
 
         // Scan both directories
-        let mut all_directories = Vec::new();
-        for scan_dir in [&work_dir, &personal_dir] {
-            if scan_dir.exists() && scan_dir.is_dir() {
-                let found_dirs = scan_git_directories(scan_dir).unwrap_or_default();
-                all_directories.extend(found_dirs);
-            }
-        }
-
+        let all_directories = scan_git_directories(&[&work_dir, &personal_dir]).unwrap();
         assert_eq!(all_directories.len(), 2);
         assert!(all_directories.contains(&git_repo1));
         assert!(all_directories.contains(&project2));
