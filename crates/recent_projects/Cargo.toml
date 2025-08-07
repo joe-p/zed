@@ -22,6 +22,7 @@ file_finder.workspace = true
 futures.workspace = true
 fuzzy.workspace = true
 gpui.workspace = true
+ignore.workspace = true
 language.workspace = true
 log.workspace = true
 markdown.workspace = true
@@ -42,7 +43,7 @@ telemetry.workspace = true
 theme.workspace = true
 ui.workspace = true
 util.workspace = true
-walkdir.workspace = true
+
 workspace.workspace = true
 zed_actions.workspace = true
 workspace-hack.workspace = true

@@ -57,15 +57,15 @@ use gpui::{
     App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Task,
     WeakEntity, Window,
 };
+use ignore::WalkBuilder;
 use menu;
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, mpsc},
 };
 use ui::{Color, Icon, IconName, Label, LabelSize, ListItem, ListItemSpacing, prelude::*};
-use walkdir::WalkDir;
 use workspace::{ModalView, Workspace, with_active_or_new_workspace};
 use zed_actions::OpenGitDirectory;
 
@@ -403,32 +403,55 @@ async fn scan_git_directories(git_path: &Path) -> Result<Vec<PathBuf>, std::io::
 
     let mut directories = Vec::new();
 
-    // Use WalkDir to scan only immediate subdirectories (max_depth 1)
-    for entry in WalkDir::new(git_path)
-        .min_depth(1) // Skip the git_path
-        .max_depth(1) // Only scan immediate subdirectories
-        .into_iter()
-        .filter_entry(|e| {
-            // Skip hidden directories
-            !e.file_name().to_string_lossy().starts_with('.')
-        })
-    {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                log::error!(
-                    "Failed to read directory entry in {}: {}",
-                    git_path.display(),
-                    e
-                );
-                continue;
+    // Use WalkBuilder to scan only immediate subdirectories (max_depth 1)
+    let git_path_clone = git_path.to_path_buf();
+    let walker = WalkBuilder::new(git_path)
+        .max_depth(Some(1))
+        .build_parallel();
+
+    let (tx, rx) = mpsc::channel::<Result<PathBuf, std::io::Error>>();
+
+    walker.run(|| {
+        let tx = tx.clone();
+        let git_path_clone = git_path_clone.clone();
+        Box::new(move |result| {
+            match result {
+                Ok(entry) => {
+                    let path = entry.path();
+                    // Only include directories that are direct children (depth 1) and not the root path itself
+                    if path.is_dir() && path != git_path_clone {
+                        if let Err(e) = tx.send(Ok(path.to_path_buf())) {
+                            log::error!("Failed to send directory path: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to read directory entry in {}: {}",
+                        git_path_clone.display(),
+                        e
+                    );
+                    if let Err(send_err) =
+                        tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                    {
+                        log::error!("Failed to send error: {}", send_err);
+                    }
+                }
             }
-        };
+            ignore::WalkState::Continue
+        })
+    });
 
-        let path = entry.path();
+    // Drop the original sender to signal completion
+    drop(tx);
 
-        if path.is_dir() {
-            directories.push(path.to_path_buf());
+    // Collect results
+    for result in rx {
+        match result {
+            Ok(path) => directories.push(path),
+            Err(e) => {
+                log::error!("Error during directory scan: {}", e);
+            }
         }
     }
 
