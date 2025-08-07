@@ -123,7 +123,7 @@ impl GitDirectories {
             let mut all_directories = Vec::new();
             for scan_dir in scan_dirs {
                 if scan_dir.exists() && scan_dir.is_dir() {
-                    let mut found_dirs = scan_git_directories(&scan_dir).await.unwrap_or_default();
+                    let mut found_dirs = scan_git_directories(&scan_dir).unwrap_or_default();
                     all_directories.append(&mut found_dirs);
                 } else {
                     log::info!("Directory not found at {}", scan_dir.display());
@@ -390,7 +390,7 @@ impl PickerDelegate for GitDirectoriesDelegate {
     }
 }
 
-async fn scan_git_directories(git_path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+fn scan_git_directories(git_path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     if !git_path.exists() {
         log::debug!("Git path does not exist: {}", git_path.display());
         return Ok(Vec::new());
@@ -474,7 +474,7 @@ mod tests {
     #[test]
     fn test_scan_git_directories_empty_dir() {
         let temp_dir = TempDir::new().unwrap();
-        let result = smol::block_on(scan_git_directories(temp_dir.path())).unwrap();
+        let result = scan_git_directories(temp_dir.path()).unwrap();
         assert!(result.is_empty());
     }
 
@@ -485,7 +485,7 @@ mod tests {
         fs::create_dir(&git_repo_path).unwrap();
         fs::create_dir(git_repo_path.join(".git")).unwrap();
 
-        let result = smol::block_on(scan_git_directories(temp_dir.path())).unwrap();
+        let result = scan_git_directories(temp_dir.path()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], git_repo_path);
     }
@@ -497,7 +497,7 @@ mod tests {
         fs::create_dir(&project_path).unwrap();
         fs::write(project_path.join("main.rs"), "fn main() {}").unwrap();
 
-        let result = smol::block_on(scan_git_directories(temp_dir.path())).unwrap();
+        let result = scan_git_directories(temp_dir.path()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], project_path);
     }
@@ -509,7 +509,7 @@ mod tests {
         fs::create_dir(&hidden_dir).unwrap();
         fs::create_dir(hidden_dir.join(".git")).unwrap();
 
-        let result = smol::block_on(scan_git_directories(temp_dir.path())).unwrap();
+        let result = scan_git_directories(temp_dir.path()).unwrap();
         assert!(result.is_empty());
     }
 
@@ -575,7 +575,7 @@ mod tests {
         let mut all_directories = Vec::new();
         for scan_dir in [&work_dir, &personal_dir] {
             if scan_dir.exists() && scan_dir.is_dir() {
-                let found_dirs = smol::block_on(scan_git_directories(scan_dir)).unwrap_or_default();
+                let found_dirs = scan_git_directories(scan_dir).unwrap_or_default();
                 all_directories.extend(found_dirs);
             }
         }
