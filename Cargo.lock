@@ -16351,6 +16351,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "subdirectories_picker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 4.0.0",
+ "fuzzy",
+ "gpui",
+ "menu",
+ "ordered-float 2.10.1",
+ "picker",
+ "smol",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -21245,6 +21263,7 @@ dependencies = [
  "smol",
  "snippet_provider",
  "snippets_ui",
+ "subdirectories_picker",
  "supermaven",
  "svg_preview",
  "sysinfo 0.37.2",

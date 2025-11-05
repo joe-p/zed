@@ -408,6 +408,18 @@ pub struct OpenRemote {
     pub create_new_window: bool,
 }
 
+/// Opens a picker to select from subdirectories in a specific directory.
+#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+#[action(namespace = projects)]
+#[serde(deny_unknown_fields)]
+pub struct OpenSubdirectories {
+    #[serde(default)]
+    pub create_new_window: bool,
+    /// The base directories to search for subdirectories. If not specified, defaults to the user's home directory.
+    #[serde(default)]
+    pub base_directories: Option<Vec<String>>,
+}
+
 /// Where to spawn the task in the UI.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

@@ -591,6 +591,7 @@ pub fn main() {
         );
         repl::init(app_state.fs.clone(), cx);
         recent_projects::init(cx);
+        subdirectories_picker::init(cx);
 
         load_embedded_fonts(cx);
 
