@@ -621,14 +621,14 @@ impl PullRequestView {
             .gap_4()
             .child(header)
             .child(Divider::horizontal())
-            .child(self.render_checks(&loaded.checks, cx))
-            .child(Divider::horizontal())
             .child(
                 v_flex()
                     .gap_2()
                     .child(Label::new("Description").size(LabelSize::Large))
                     .child(description),
             )
+            .child(Divider::horizontal())
+            .child(self.render_checks(&loaded.checks, cx))
             .into_any_element()
     }
 
