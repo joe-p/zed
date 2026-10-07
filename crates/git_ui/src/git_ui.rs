@@ -52,6 +52,7 @@ mod git_runtime_diagnostics;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
+mod pull_request_view;
 pub(crate) mod remote_output;
 pub mod repository_selector;
 pub mod solo_diff_view;
@@ -116,6 +117,7 @@ pub fn init(cx: &mut App) {
         git_panel::register(workspace);
         repository_selector::register(workspace);
         git_picker::register(workspace);
+        pull_request_view::register(workspace);
 
         workspace.register_action(
             |workspace, action: &zed_actions::CreateWorktree, window, cx| {

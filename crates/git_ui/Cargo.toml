@@ -35,6 +35,7 @@ futures.workspace = true
 fuzzy.workspace = true
 fuzzy_nucleo.workspace = true
 git.workspace = true
+http_client.workspace = true
 gpui.workspace = true
 itertools.workspace = true
 language.workspace = true
@@ -73,6 +74,7 @@ workspace.workspace = true
 git_ui_core.workspace = true
 zed_actions.workspace = true
 ztracing.workspace = true
+zed_credentials_provider.workspace = true
 
 [dev-dependencies]
 ctor.workspace = true
@@ -80,7 +82,9 @@ db = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 git = { workspace = true, features = ["test-support"] }
+git_hosting_providers.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
 indoc.workspace = true
 language = { workspace = true, features = ["test-support"] }
 pretty_assertions.workspace = true

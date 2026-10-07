@@ -503,6 +503,11 @@ pub struct GitSettings {
     ///
     /// Default: ../worktrees
     pub worktree_directory: String,
+    /// OAuth application client IDs used to sign in to Git hosting providers,
+    /// keyed by host.
+    ///
+    /// Default: {}
+    pub hosting_oauth_client_ids: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -719,6 +724,7 @@ impl Settings for ProjectSettings {
                 .worktree_directory
                 .clone()
                 .unwrap_or_else(|| DEFAULT_WORKTREE_DIRECTORY.to_string()),
+            hosting_oauth_client_ids: git.hosting_oauth_client_ids.clone().unwrap_or_default(),
         };
         Self {
             context_servers: project

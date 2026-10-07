@@ -1,6 +1,6 @@
-use std::{ops::Range, sync::Arc};
+use std::{ops::Range, sync::Arc, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use derive_more::{Deref, DerefMut};
 use gpui::{App, Global, SharedString};
@@ -16,6 +16,77 @@ pub struct PullRequest {
     pub number: u32,
     pub url: Url,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestState {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestDetails {
+    pub number: u32,
+    pub title: SharedString,
+    pub body: SharedString,
+    pub state: PullRequestState,
+    pub author: Option<SharedString>,
+    pub url: Url,
+    pub head_branch: SharedString,
+    pub head_sha: SharedString,
+    pub base_branch: SharedString,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CheckStatus {
+    Failure,
+    Pending,
+    Cancelled,
+    Success,
+    Neutral,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckRun {
+    pub name: SharedString,
+    pub status: CheckStatus,
+    pub description: Option<SharedString>,
+    pub url: Option<Url>,
+}
+
+/// An in-progress OAuth device authorization. The user must visit
+/// `verification_uri` and enter `user_code` to complete it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthDeviceAuthorization {
+    pub user_code: SharedString,
+    pub verification_uri: SharedString,
+    pub device_code: String,
+    pub poll_interval: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthAccessTokenPoll {
+    Pending,
+    SlowDown,
+    Granted(String),
+}
+
+/// Returned by hosting provider API calls when the credentials are missing,
+/// expired, or revoked, so callers can prompt the user to sign in again.
+#[derive(Debug)]
+pub struct HostingProviderUnauthorized {
+    pub message: String,
+}
+
+impl std::fmt::Display for HostingProviderUnauthorized {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for HostingProviderUnauthorized {}
 
 #[derive(Clone)]
 pub struct GitRemote {
@@ -144,6 +215,53 @@ pub trait GitHostingProvider {
         _http_client: Arc<dyn HttpClient>,
     ) -> Result<Option<Url>> {
         Ok(None)
+    }
+
+    /// Returns whether this provider can fetch pull request details and checks.
+    fn supports_pull_request_details(&self) -> bool {
+        false
+    }
+
+    /// Begins an OAuth device authorization for the given OAuth application.
+    async fn request_oauth_device_authorization(
+        &self,
+        _client_id: &str,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<OAuthDeviceAuthorization> {
+        bail!("{} does not support signing in", self.name())
+    }
+
+    /// Checks once whether the user has completed the device authorization.
+    async fn poll_oauth_access_token(
+        &self,
+        _client_id: &str,
+        _authorization: &OAuthDeviceAuthorization,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<OAuthAccessTokenPoll> {
+        bail!("{} does not support signing in", self.name())
+    }
+
+    /// Finds the most relevant pull request in `remote` whose head is
+    /// `head_branch` in the repository owned by `head_owner`.
+    async fn find_pull_request(
+        &self,
+        _remote: &ParsedGitRemote,
+        _head_owner: &str,
+        _head_branch: &str,
+        _access_token: Option<&str>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<PullRequestDetails>> {
+        bail!("{} does not support pull request details", self.name())
+    }
+
+    async fn pull_request_checks(
+        &self,
+        _remote: &ParsedGitRemote,
+        _pull_request: &PullRequestDetails,
+        _access_token: Option<&str>,
+        _http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<CheckRun>> {
+        bail!("{} does not support pull request checks", self.name())
     }
 }
 

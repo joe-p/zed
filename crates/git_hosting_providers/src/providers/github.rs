@@ -1,5 +1,6 @@
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use async_trait::async_trait;
@@ -8,12 +9,14 @@ use gpui::SharedString;
 use http_client::{AsyncBody, HttpClient, HttpRequestExt, Request};
 use regex::Regex;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use url::Url;
 use urlencoding::encode;
 
 use git::{
-    BuildCommitPermalinkParams, BuildPermalinkParams, GitHostingProvider, ParsedGitRemote,
-    PullRequest, RemoteUrl,
+    BuildCommitPermalinkParams, BuildPermalinkParams, CheckRun, CheckStatus, GitHostingProvider,
+    HostingProviderUnauthorized, OAuthAccessTokenPoll, OAuthDeviceAuthorization, ParsedGitRemote,
+    PullRequest, PullRequestDetails, PullRequestState, RemoteUrl,
 };
 
 use crate::get_host_from_git_remote_url;
@@ -60,6 +63,189 @@ struct User {
     )]
     pub id: u64,
     pub avatar_url: String,
+}
+
+// `repo` is the narrowest OAuth scope that grants read access to private
+// repositories' pull requests and checks.
+const OAUTH_SCOPE: &str = "repo";
+const OAUTH_DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+#[derive(Debug, Deserialize)]
+struct OAuthDeviceCodeResponse {
+    device_code: Option<String>,
+    user_code: Option<String>,
+    verification_uri: Option<String>,
+    interval: Option<u64>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthAccessTokenResponse {
+    access_token: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubPullRequest {
+    number: u32,
+    title: String,
+    body: Option<String>,
+    state: String,
+    #[serde(default)]
+    draft: bool,
+    merged_at: Option<String>,
+    user: Option<GithubUser>,
+    html_url: String,
+    head: GithubPullRequestRef,
+    base: GithubPullRequestRef,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubUser {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubPullRequestRef {
+    #[serde(rename = "ref")]
+    name: String,
+    sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCheckRuns {
+    check_runs: Vec<GithubCheckRun>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCheckRun {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    html_url: Option<String>,
+    details_url: Option<String>,
+    output: Option<GithubCheckRunOutput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCheckRunOutput {
+    title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCombinedStatus {
+    statuses: Vec<GithubCommitStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCommitStatus {
+    context: String,
+    state: String,
+    description: Option<String>,
+    target_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubErrorResponse {
+    message: String,
+}
+
+impl TryFrom<GithubPullRequest> for PullRequestDetails {
+    type Error = anyhow::Error;
+
+    fn try_from(pull_request: GithubPullRequest) -> Result<Self> {
+        let state = if pull_request.merged_at.is_some() {
+            PullRequestState::Merged
+        } else if pull_request.state == "closed" {
+            PullRequestState::Closed
+        } else if pull_request.draft {
+            PullRequestState::Draft
+        } else {
+            PullRequestState::Open
+        };
+
+        Ok(Self {
+            number: pull_request.number,
+            title: pull_request.title.into(),
+            body: pull_request.body.unwrap_or_default().into(),
+            state,
+            author: pull_request.user.map(|user| user.login.into()),
+            url: Url::parse(&pull_request.html_url).context("invalid pull request URL")?,
+            head_branch: pull_request.head.name.into(),
+            head_sha: pull_request.head.sha.into(),
+            base_branch: pull_request.base.name.into(),
+        })
+    }
+}
+
+impl From<GithubCheckRun> for CheckRun {
+    fn from(check_run: GithubCheckRun) -> Self {
+        let status = if check_run.status != "completed" {
+            CheckStatus::Pending
+        } else {
+            match check_run.conclusion.as_deref() {
+                Some("success") => CheckStatus::Success,
+                Some("failure" | "timed_out" | "action_required" | "startup_failure") => {
+                    CheckStatus::Failure
+                }
+                Some("cancelled") => CheckStatus::Cancelled,
+                Some("skipped") => CheckStatus::Skipped,
+                _ => CheckStatus::Neutral,
+            }
+        };
+
+        Self {
+            name: check_run.name.into(),
+            status,
+            description: check_run
+                .output
+                .and_then(|output| output.title)
+                .map(Into::into),
+            url: check_run
+                .html_url
+                .or(check_run.details_url)
+                .and_then(|url| Url::parse(&url).ok()),
+        }
+    }
+}
+
+impl From<GithubCommitStatus> for CheckRun {
+    fn from(commit_status: GithubCommitStatus) -> Self {
+        let status = match commit_status.state.as_str() {
+            "success" => CheckStatus::Success,
+            "failure" | "error" => CheckStatus::Failure,
+            _ => CheckStatus::Pending,
+        };
+
+        Self {
+            name: commit_status.context.into(),
+            status,
+            description: commit_status.description.map(Into::into),
+            url: commit_status
+                .target_url
+                .and_then(|url| Url::parse(&url).ok()),
+        }
+    }
+}
+
+fn select_pull_request(pull_requests: Vec<GithubPullRequest>) -> Option<GithubPullRequest> {
+    let open_index = pull_requests
+        .iter()
+        .position(|pull_request| pull_request.state == "open");
+    pull_requests.into_iter().nth(open_index.unwrap_or(0))
+}
+
+fn oauth_error(error: &str, description: Option<String>) -> anyhow::Error {
+    match error {
+        "expired_token" => anyhow::anyhow!("The sign-in code expired. Please try again."),
+        "access_denied" => anyhow::anyhow!("Sign-in was cancelled."),
+        _ => anyhow::anyhow!(
+            "Sign-in failed: {}",
+            description.unwrap_or_else(|| error.to_string())
+        ),
+    }
 }
 
 #[derive(Debug)]
@@ -119,6 +305,101 @@ impl Github {
             "GitHub Self-Hosted",
             Url::parse(&format!("https://{}", host))?,
         ))
+    }
+
+    fn api_base_url(&self) -> Result<String> {
+        let Some(host) = self.base_url.host_str() else {
+            bail!("failed to get host from github base url");
+        };
+        Ok(if host == "github.com" {
+            "https://api.github.com".to_string()
+        } else if host.ends_with(".ghe.com") {
+            format!("https://api.{host}")
+        } else {
+            format!("https://{host}/api/v3")
+        })
+    }
+
+    async fn send_api_request<T: DeserializeOwned>(
+        &self,
+        path_and_query: &str,
+        access_token: Option<&str>,
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<T> {
+        let url = format!("{}{path_and_query}", self.api_base_url()?);
+        let mut request = Request::get(&url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .follow_redirects(http_client::RedirectPolicy::FollowAll);
+
+        let environment_token = std::env::var("GITHUB_TOKEN").ok();
+        let access_token = access_token.or(environment_token.as_deref());
+        if let Some(access_token) = access_token {
+            request = request.header("Authorization", format!("Bearer {access_token}"));
+        }
+
+        let mut response = http_client
+            .send(request.body(AsyncBody::default())?)
+            .await
+            .with_context(|| format!("error sending GitHub request to {url}"))?;
+        let mut body = Vec::new();
+        response.body_mut().read_to_end(&mut body).await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let message = serde_json::from_slice::<GithubErrorResponse>(&body)
+                .map(|error| error.message)
+                .unwrap_or_else(|_| String::from_utf8_lossy(&body).into_owned());
+            // Unauthenticated requests get a 404 for private repositories and a
+            // 403 once the anonymous rate limit is exhausted; signing in fixes both.
+            if status.as_u16() == 401
+                || (access_token.is_none() && matches!(status.as_u16(), 403 | 404))
+            {
+                return Err(HostingProviderUnauthorized {
+                    message: format!("Sign in to {} to continue ({message})", self.name),
+                }
+                .into());
+            }
+            bail!("GitHub request failed with status {status}: {message}");
+        }
+
+        serde_json::from_slice(&body)
+            .with_context(|| format!("failed to deserialize GitHub response from {url}"))
+    }
+
+    async fn send_oauth_request<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        form: &[(&str, &str)],
+        http_client: &Arc<dyn HttpClient>,
+    ) -> Result<T> {
+        let url = self.base_url.join(path)?;
+        let body = form
+            .iter()
+            .map(|(key, value)| format!("{}={}", encode(key), encode(value)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let request = Request::post(url.as_str())
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(AsyncBody::from(body))?;
+
+        let mut response = http_client
+            .send(request)
+            .await
+            .with_context(|| format!("error sending GitHub OAuth request to {url}"))?;
+        let mut body = Vec::new();
+        response.body_mut().read_to_end(&mut body).await?;
+
+        // GitHub reports OAuth errors in the JSON body, sometimes with a
+        // success status, so the body is parsed regardless of the status.
+        serde_json::from_slice(&body).with_context(|| {
+            format!(
+                "failed to deserialize GitHub OAuth response ({}): {}",
+                response.status(),
+                String::from_utf8_lossy(&body)
+            )
+        })
     }
 
     async fn fetch_github_commit_author(
@@ -297,6 +578,134 @@ impl GitHostingProvider for Github {
             })
             .transpose()?;
         Ok(avatar_url)
+    }
+
+    fn supports_pull_request_details(&self) -> bool {
+        true
+    }
+
+    async fn request_oauth_device_authorization(
+        &self,
+        client_id: &str,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<OAuthDeviceAuthorization> {
+        let response: OAuthDeviceCodeResponse = self
+            .send_oauth_request(
+                "login/device/code",
+                &[("client_id", client_id), ("scope", OAUTH_SCOPE)],
+                &http_client,
+            )
+            .await?;
+
+        if let Some(error) = response.error {
+            return Err(oauth_error(&error, response.error_description));
+        }
+
+        let (Some(device_code), Some(user_code), Some(verification_uri)) = (
+            response.device_code,
+            response.user_code,
+            response.verification_uri,
+        ) else {
+            bail!("GitHub returned an incomplete device authorization response");
+        };
+
+        Ok(OAuthDeviceAuthorization {
+            user_code: user_code.into(),
+            verification_uri: verification_uri.into(),
+            device_code,
+            poll_interval: Duration::from_secs(response.interval.unwrap_or(5).max(1)),
+        })
+    }
+
+    async fn poll_oauth_access_token(
+        &self,
+        client_id: &str,
+        authorization: &OAuthDeviceAuthorization,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<OAuthAccessTokenPoll> {
+        let response: OAuthAccessTokenResponse = self
+            .send_oauth_request(
+                "login/oauth/access_token",
+                &[
+                    ("client_id", client_id),
+                    ("device_code", &authorization.device_code),
+                    ("grant_type", OAUTH_DEVICE_CODE_GRANT_TYPE),
+                ],
+                &http_client,
+            )
+            .await?;
+
+        if let Some(access_token) = response.access_token {
+            return Ok(OAuthAccessTokenPoll::Granted(access_token));
+        }
+
+        match response.error.as_deref() {
+            Some("authorization_pending") => Ok(OAuthAccessTokenPoll::Pending),
+            Some("slow_down") => Ok(OAuthAccessTokenPoll::SlowDown),
+            Some(error) => Err(oauth_error(error, response.error_description)),
+            None => bail!("GitHub returned an unexpected access token response"),
+        }
+    }
+
+    async fn find_pull_request(
+        &self,
+        remote: &ParsedGitRemote,
+        head_owner: &str,
+        head_branch: &str,
+        access_token: Option<&str>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Option<PullRequestDetails>> {
+        let ParsedGitRemote { owner, repo } = remote;
+        let head = encode(&format!("{head_owner}:{head_branch}")).into_owned();
+        let pull_requests: Vec<GithubPullRequest> = self
+            .send_api_request(
+                &format!("/repos/{owner}/{repo}/pulls?head={head}&state=all&per_page=10"),
+                access_token,
+                &http_client,
+            )
+            .await?;
+
+        select_pull_request(pull_requests)
+            .map(PullRequestDetails::try_from)
+            .transpose()
+    }
+
+    async fn pull_request_checks(
+        &self,
+        remote: &ParsedGitRemote,
+        pull_request: &PullRequestDetails,
+        access_token: Option<&str>,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Result<Vec<CheckRun>> {
+        let ParsedGitRemote { owner, repo } = remote;
+        let sha = &pull_request.head_sha;
+        let check_runs_path =
+            format!("/repos/{owner}/{repo}/commits/{sha}/check-runs?per_page=100");
+        let statuses_path = format!("/repos/{owner}/{repo}/commits/{sha}/status?per_page=100");
+
+        // GitHub Actions and GitHub Apps report check runs, while many external
+        // CI services still report legacy commit statuses.
+        let (check_runs, combined_status) = futures::join!(
+            self.send_api_request::<GithubCheckRuns>(&check_runs_path, access_token, &http_client),
+            self.send_api_request::<GithubCombinedStatus>(
+                &statuses_path,
+                access_token,
+                &http_client
+            ),
+        );
+
+        let mut checks = check_runs?
+            .check_runs
+            .into_iter()
+            .map(CheckRun::from)
+            .chain(combined_status?.statuses.into_iter().map(CheckRun::from))
+            .collect::<Vec<_>>();
+        checks.sort_by(|left, right| {
+            left.status
+                .cmp(&right.status)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(checks)
     }
 }
 
@@ -664,6 +1073,156 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "https://avatars.githubusercontent.com/u/e?email=12345%2Boctocat%40users.noreply.github.com&s=128"
+        );
+    }
+
+    fn github_pull_request(state: &str, draft: bool, merged_at: Option<&str>) -> GithubPullRequest {
+        serde_json::from_value(serde_json::json!({
+            "number": 42,
+            "title": "Add feature",
+            "body": null,
+            "state": state,
+            "draft": draft,
+            "merged_at": merged_at,
+            "user": { "login": "octocat" },
+            "html_url": "https://github.com/zed-industries/zed/pull/42",
+            "head": { "ref": "feature", "sha": "abc123" },
+            "base": { "ref": "main", "sha": "def456" },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_pull_request_details_state() {
+        let cases = [
+            (("open", false, None), PullRequestState::Open),
+            (("open", true, None), PullRequestState::Draft),
+            (("closed", false, None), PullRequestState::Closed),
+            (
+                ("closed", false, Some("2024-01-01T00:00:00Z")),
+                PullRequestState::Merged,
+            ),
+        ];
+
+        for ((state, draft, merged_at), expected_state) in cases {
+            let details =
+                PullRequestDetails::try_from(github_pull_request(state, draft, merged_at)).unwrap();
+            assert_eq!(details.state, expected_state);
+        }
+
+        let details =
+            PullRequestDetails::try_from(github_pull_request("open", false, None)).unwrap();
+        assert_eq!(details.number, 42);
+        assert_eq!(details.body.as_ref(), "");
+        assert_eq!(details.author.as_deref(), Some("octocat"));
+        assert_eq!(details.head_branch.as_ref(), "feature");
+        assert_eq!(details.head_sha.as_ref(), "abc123");
+        assert_eq!(details.base_branch.as_ref(), "main");
+    }
+
+    #[test]
+    fn test_select_pull_request_prefers_open() {
+        let mut closed = github_pull_request("closed", false, None);
+        closed.number = 1;
+        let mut open = github_pull_request("open", false, None);
+        open.number = 2;
+
+        let selected = select_pull_request(vec![closed, open]).unwrap();
+        assert_eq!(selected.number, 2);
+
+        let mut first_closed = github_pull_request("closed", false, None);
+        first_closed.number = 3;
+        let mut second_closed = github_pull_request("closed", false, None);
+        second_closed.number = 4;
+        let selected = select_pull_request(vec![first_closed, second_closed]).unwrap();
+        assert_eq!(selected.number, 3);
+
+        assert!(select_pull_request(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn test_check_run_status() {
+        let check_run = |status: &str, conclusion: Option<&str>| -> CheckRun {
+            serde_json::from_value::<GithubCheckRun>(serde_json::json!({
+                "name": "test",
+                "status": status,
+                "conclusion": conclusion,
+                "html_url": "https://github.com/zed-industries/zed/runs/1",
+                "details_url": null,
+                "output": { "title": "All good" },
+            }))
+            .unwrap()
+            .into()
+        };
+
+        assert_eq!(check_run("in_progress", None).status, CheckStatus::Pending);
+        assert_eq!(check_run("queued", None).status, CheckStatus::Pending);
+        assert_eq!(
+            check_run("completed", Some("success")).status,
+            CheckStatus::Success
+        );
+        assert_eq!(
+            check_run("completed", Some("timed_out")).status,
+            CheckStatus::Failure
+        );
+        assert_eq!(
+            check_run("completed", Some("cancelled")).status,
+            CheckStatus::Cancelled
+        );
+        assert_eq!(
+            check_run("completed", Some("skipped")).status,
+            CheckStatus::Skipped
+        );
+        assert_eq!(
+            check_run("completed", Some("neutral")).status,
+            CheckStatus::Neutral
+        );
+
+        let check = check_run("completed", Some("success"));
+        assert_eq!(check.description.as_deref(), Some("All good"));
+        assert_eq!(
+            check.url.unwrap().as_str(),
+            "https://github.com/zed-industries/zed/runs/1"
+        );
+    }
+
+    #[test]
+    fn test_commit_status() {
+        let commit_status = |state: &str| -> CheckRun {
+            serde_json::from_value::<GithubCommitStatus>(serde_json::json!({
+                "context": "ci/external",
+                "state": state,
+                "description": null,
+                "target_url": null,
+            }))
+            .unwrap()
+            .into()
+        };
+
+        assert_eq!(commit_status("success").status, CheckStatus::Success);
+        assert_eq!(commit_status("failure").status, CheckStatus::Failure);
+        assert_eq!(commit_status("error").status, CheckStatus::Failure);
+        assert_eq!(commit_status("pending").status, CheckStatus::Pending);
+        assert_eq!(commit_status("success").name.as_ref(), "ci/external");
+    }
+
+    #[test]
+    fn test_api_base_url() {
+        assert_eq!(
+            Github::public_instance().api_base_url().unwrap(),
+            "https://api.github.com"
+        );
+        assert_eq!(
+            Github::new("GitHub", Url::parse("https://acme.ghe.com").unwrap())
+                .api_base_url()
+                .unwrap(),
+            "https://api.acme.ghe.com"
+        );
+        assert_eq!(
+            Github::new("GitHub", Url::parse("https://github.corp.com").unwrap())
+                .api_base_url()
+                .unwrap(),
+            "https://github.corp.com/api/v3"
         );
     }
 }

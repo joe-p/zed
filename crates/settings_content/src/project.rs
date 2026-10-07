@@ -694,6 +694,12 @@ pub struct GitSettings {
     ///
     /// Default: ../worktrees
     pub worktree_directory: Option<String>,
+    /// OAuth application client IDs used to sign in to Git hosting providers,
+    /// keyed by host (e.g., `"github.com"`). Signing in allows Zed to show
+    /// pull request details and check statuses.
+    ///
+    /// Default: {}
+    pub hosting_oauth_client_ids: Option<HashMap<String, String>>,
 }
 
 #[with_fallible_options]

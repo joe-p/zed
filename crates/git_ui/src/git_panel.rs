@@ -9,6 +9,7 @@ use crate::commit_tooltip::{CommitAvatar, CommitTooltip};
 use crate::commit_view::CommitView;
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
 use crate::project_diff::{DeployBranchDiff, Diff, ProjectDiff};
+use crate::pull_request_view;
 use crate::remote_output::{self, RemoteAction, SuccessMessage};
 use crate::solo_diff_view::SoloDiffView;
 use crate::staged_diff::StagedDiff;
@@ -489,6 +490,45 @@ fn git_panel_view_options_menu(
                         }
                     })
             })
+    })
+}
+
+pub(crate) struct TrackedRemote {
+    /// The name of the branch on the remote.
+    pub branch: String,
+    pub remote_url: String,
+}
+
+/// Resolves the remote branch tracked by the repository's current branch.
+pub(crate) fn tracked_remote(repository: &Repository) -> anyhow::Result<TrackedRemote> {
+    let branch = repository
+        .branch
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No active branch"))?;
+    let remote_branch = branch
+        .upstream
+        .as_ref()
+        .filter(|upstream| matches!(upstream.tracking, UpstreamTracking::Tracked(_)))
+        .and_then(|upstream| upstream.branch_name())
+        .ok_or_else(|| anyhow::anyhow!("No remote configured for repository"))?;
+
+    let remote_origin = repository.remote_origin_url.as_deref();
+    let remote_upstream = repository.remote_upstream_url.as_deref();
+    let remote_url = branch
+        .upstream
+        .as_ref()
+        .and_then(|upstream| match upstream.remote_name() {
+            Some("upstream") => remote_upstream,
+            Some(_) => remote_origin,
+            None => None,
+        })
+        .or(remote_origin)
+        .or(remote_upstream)
+        .ok_or_else(|| anyhow::anyhow!("No remote configured for repository"))?;
+
+    Ok(TrackedRemote {
+        branch: remote_branch.to_string(),
+        remote_url: remote_url.to_string(),
     })
 }
 
@@ -4850,36 +4890,10 @@ impl GitPanel {
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("No active repository"))?;
 
-            let (branch, remote_origin, remote_upstream) = {
-                let repository = repo.read(cx);
-                (
-                    repository.branch.clone(),
-                    repository.remote_origin_url.clone(),
-                    repository.remote_upstream_url.clone(),
-                )
-            };
-
-            let branch = branch.ok_or_else(|| anyhow::anyhow!("No active branch"))?;
-            let source_branch = branch
-                .upstream
-                .as_ref()
-                .filter(|upstream| matches!(upstream.tracking, UpstreamTracking::Tracked(_)))
-                .and_then(|upstream| upstream.branch_name())
-                .ok_or_else(|| anyhow::anyhow!("No remote configured for repository"))?;
-            let source_branch = source_branch.to_string();
-
-            let remote_url = branch
-                .upstream
-                .as_ref()
-                .and_then(|upstream| match upstream.remote_name() {
-                    Some("upstream") => remote_upstream.as_deref(),
-                    Some(_) => remote_origin.as_deref(),
-                    None => None,
-                })
-                .or(remote_origin.as_deref())
-                .or(remote_upstream.as_deref())
-                .ok_or_else(|| anyhow::anyhow!("No remote configured for repository"))?;
-            let remote_url = remote_url.to_string();
+            let TrackedRemote {
+                branch: source_branch,
+                remote_url,
+            } = tracked_remote(repo.read(cx))?;
 
             let provider_registry = GitHostingProviderRegistry::global(cx);
             let Some((provider, parsed_remote)) =
@@ -6679,6 +6693,9 @@ impl GitPanel {
         self.active_repository.as_ref()?;
 
         let diff_stat_total = self.diff_stat_total;
+        let supports_pull_requests = self.active_repository.as_ref().is_some_and(|repository| {
+            pull_request_view::repository_supports_pull_requests(repository.read(cx), cx)
+        });
 
         Some(
             h_flex()
@@ -6691,41 +6708,11 @@ impl GitPanel {
                 .gap_1()
                 .justify_between()
                 .child(
-                    ButtonLike::new("diff-button")
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(
-                                    Icon::new(IconName::Diff)
-                                        .size(IconSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .child(
-                                    Label::new("View Diff")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted),
-                                )
-                                .when(
-                                    GitPanelSettings::get_global(cx).diff_stats
-                                        && diff_stat_total != DiffStat::default(),
-                                    |this| {
-                                        this.child(ui::DiffStat::new(
-                                            "changes-diff-stat-total",
-                                            diff_stat_total.added as usize,
-                                            diff_stat_total.deleted as usize,
-                                        ))
-                                    },
-                                ),
-                        )
-                        .tooltip(Tooltip::for_action_title_in(
-                            "View Diff",
-                            &Diff,
-                            &self.focus_handle,
-                        ))
-                        .on_click(|_, _, cx| {
-                            cx.defer(|cx| {
-                                cx.dispatch_action(&Diff);
-                            })
+                    h_flex()
+                        .gap_1()
+                        .child(self.render_diff_button(diff_stat_total, cx))
+                        .when(supports_pull_requests, |this| {
+                            this.child(self.render_pull_request_button())
                         }),
                 )
                 .child(
@@ -6735,6 +6722,73 @@ impl GitPanel {
                         .child(self.render_git_changes_actions_button(cx)),
                 ),
         )
+    }
+
+    fn render_diff_button(&self, diff_stat_total: DiffStat, cx: &App) -> impl IntoElement {
+        ButtonLike::new("diff-button")
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::Diff)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new("View Diff")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .when(
+                        GitPanelSettings::get_global(cx).diff_stats
+                            && diff_stat_total != DiffStat::default(),
+                        |this| {
+                            this.child(ui::DiffStat::new(
+                                "changes-diff-stat-total",
+                                diff_stat_total.added as usize,
+                                diff_stat_total.deleted as usize,
+                            ))
+                        },
+                    ),
+            )
+            .tooltip(Tooltip::for_action_title_in(
+                "View Diff",
+                &Diff,
+                &self.focus_handle,
+            ))
+            .on_click(|_, _, cx| {
+                cx.defer(|cx| {
+                    cx.dispatch_action(&Diff);
+                })
+            })
+    }
+
+    fn render_pull_request_button(&self) -> impl IntoElement {
+        ButtonLike::new("pull-request-button")
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::PullRequest)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new("Pull Request")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
+            .tooltip(Tooltip::for_action_title_in(
+                "View Pull Request",
+                &zed_actions::git::ViewPullRequest,
+                &self.focus_handle,
+            ))
+            .on_click(|_, _, cx| {
+                cx.defer(|cx| {
+                    cx.dispatch_action(&zed_actions::git::ViewPullRequest);
+                })
+            })
     }
 
     pub(crate) fn render_remote_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

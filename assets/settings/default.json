@@ -1890,6 +1890,13 @@
     //
     // Trailing slashes are ignored.
     "worktree_directory": "../worktrees",
+    // OAuth application client IDs used to sign in to Git hosting providers,
+    // keyed by host. Signing in allows Zed to show pull request details and
+    // check statuses. For GitHub, the OAuth app must have device flow enabled.
+    //
+    // Example:
+    //   "hosting_oauth_client_ids": { "github.com": "Ov23li..." }
+    "hosting_oauth_client_ids": {},
   },
   // The list of custom Git hosting providers.
   "git_hosting_providers": [
